@@ -1,209 +1,210 @@
 <?php
+if (!defined('ABSPATH')) {
+    exit('دسترسی مستقیم غیرمجاز است!');
+}
+
 /**
- * کلاس بهینه‌سازی فایل‌های استاتیک
+ * کلاس بهینه‌سازی فایل‌های CSS و JavaScript
  */
 class ASG_Assets_Optimizer {
-    /**
-     * @var ASG_Assets_Optimizer نمونه منحصر به فرد از کلاس
-     */
     private static $instance = null;
+    private $settings;
+    private $cache_dir;
+    private $css_files = array();
+    private $js_files = array();
 
     /**
-     * نسخه فایل‌های استاتیک
-     */
-    private $assets_version;
-
-    /**
-     * سازنده کلاس
-     */
-    private function __construct() {
-        $this->assets_version = defined('WP_DEBUG') && WP_DEBUG ? time() : ASG_VERSION;
-        $this->init_hooks();
-    }
-
-    /**
-     * دریافت نمونه منحصر به فرد از کلاس
+     * دریافت نمونه کلاس (الگوی Singleton)
      */
     public static function instance() {
-        if (null === self::$instance) {
+        if (is_null(self::$instance)) {
             self::$instance = new self();
         }
         return self::$instance;
     }
 
     /**
-     * اضافه کردن هوک‌ها
+     * سازنده کلاس
+     */
+    public function __construct() {
+        $this->settings = get_option('asg_settings', array());
+        $upload_dir = wp_upload_dir();
+        $this->cache_dir = $upload_dir['basedir'] . '/asg-cache';
+
+        // ایجاد دایرکتوری کش اگر وجود نداشت
+        if (!file_exists($this->cache_dir)) {
+            wp_mkdir_p($this->cache_dir);
+        }
+
+        $this->init_hooks();
+    }
+
+    /**
+     * راه‌اندازی هوک‌ها
      */
     private function init_hooks() {
-        // لود فایل‌ها در بخش عمومی
-        add_action('wp_enqueue_scripts', array($this, 'enqueue_frontend_assets'));
-        
-        // لود فایل‌ها در بخش مدیریت
-        add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_assets'));
-        
-        // اضافه کردن تنظیمات به هدر
-        add_action('wp_head', array($this, 'add_head_settings'));
-        
-        // بهینه‌سازی لود فایل‌ها
-        add_filter('script_loader_tag', array($this, 'add_async_defer_attributes'), 10, 2);
-    }
-
-/**
- * لود فایل‌های بخش عمومی
- */
-public function enqueue_frontend_assets() {
-    // فقط در صفحه فرم گارانتی یا صفحه پیگیری گارانتی
-    if ($this->is_warranty_page() || $this->is_guarantee_tracking_page()) {
-        // حذف فایل‌های غیر ضروری در صفحه پیگیری
-        if ($this->is_guarantee_tracking_page()) {
-            wp_dequeue_style('wp-block-library');
-            wp_dequeue_style('wc-blocks-style');
+        // فقط در صورت فعال بودن بهینه‌سازی
+        if (!empty($this->settings['optimize_assets'])) {
+            add_action('wp_enqueue_scripts', array($this, 'register_optimized_assets'), 999);
+            add_action('admin_enqueue_scripts', array($this, 'register_optimized_assets'), 999);
+            add_action('wp_footer', array($this, 'maybe_optimize_assets'), 999);
         }
-
-        // فایل CSS بهینه شده
-        wp_enqueue_style(
-            'asg-optimized-styles',
-            ASG_PLUGIN_URL . 'assets/css/optimized.min.css',
-            array(),
-            $this->assets_version
-        );
-
-        // دیت پیکر فارسی
-        wp_enqueue_style(
-            'persian-datepicker',
-            ASG_PLUGIN_URL . 'assets/css/persian-datepicker.min.css',
-            array(),
-            $this->assets_version
-        );
-        
-        wp_enqueue_script(
-            'persian-date',
-            ASG_PLUGIN_URL . 'assets/js/persian-date.min.js',
-            array(),
-            $this->assets_version,
-            true
-        );
-        
-        wp_enqueue_script(
-            'persian-datepicker',
-            ASG_PLUGIN_URL . 'assets/js/persian-datepicker.min.js',
-            array('persian-date'),
-            $this->assets_version,
-            true
-        );
-
-        // فایل JavaScript بهینه شده
-        wp_enqueue_script(
-            'asg-optimized-scripts',
-            ASG_PLUGIN_URL . 'assets/js/dist/optimized.min.js',
-            array('jquery'),
-            $this->assets_version,
-            true
-        );
-
-        // اضافه کردن متغیرهای مورد نیاز به JavaScript
-        wp_localize_script('asg-optimized-scripts', 'asgConfig', array(
-            'ajaxUrl' => admin_url('admin-ajax.php'),
-            'nonce' => wp_create_nonce('asg-nonce'),
-            'isRTL' => is_rtl(),
-            'debugMode' => defined('WP_DEBUG') && WP_DEBUG,
-            'currentUser' => 's-arman-m-j', // نام کاربری فعلی
-            'currentTime' => '2025-02-09 08:21:00', // زمان فعلی
-            'messages' => array(
-                'error' => __('خطایی رخ داده است', 'warranty'),
-                'success' => __('عملیات با موفقیت انجام شد', 'warranty'),
-                'loading' => __('لطفا صبر کنید...', 'warranty')
-            )
-        ));
     }
-}
 
     /**
-     * لود فایل‌های بخش مدیریت
+     * ثبت فایل‌های بهینه‌شده
      */
-    public function enqueue_admin_assets($hook) {
-        // لود فقط در صفحات مربوط به افزونه
-        if (strpos($hook, 'warranty-management') === false) {
-            return;
-        }
-
-        // استایل‌های ادمین
-        wp_enqueue_style(
-            'asg-admin-styles',
-            ASG_PLUGIN_URL . 'assets/css/asg-admin.css',
-            array(),
-            $this->assets_version
+    public function register_optimized_assets() {
+        // ثبت فایل‌های CSS بهینه‌شده
+        $this->css_files = array(
+            'asg-admin' => ASG_PLUGIN_URL . 'assets/css/asg-admin.css',
+            'asg-public' => ASG_PLUGIN_URL . 'assets/css/asg-public.css',
+            'asg-reports' => ASG_PLUGIN_URL . 'assets/css/asg-reports.css',
+            'asg-style' => ASG_PLUGIN_URL . 'assets/css/asg-style.css'
         );
 
-        // فایل‌های مربوط به گزارشات
-        if (strpos($hook, 'warranty-management-reports') !== false) {
-            wp_enqueue_style(
-                'asg-reports-styles',
-                ASG_PLUGIN_URL . 'assets/css/asg-reports.css',
-                array(),
-                $this->assets_version
-            );
-            
-            wp_enqueue_script(
-                'asg-reports-scripts',
-                ASG_PLUGIN_URL . 'assets/js/asg-reports.js',
-                array('jquery'),
-                $this->assets_version,
-                true
-            );
+        // ثبت فایل‌های JS بهینه‌شده
+        $this->js_files = array(
+            'asg-script' => ASG_PLUGIN_URL . 'assets/js/asg-script.js',
+            'asg-reports' => ASG_PLUGIN_URL . 'assets/js/asg-reports.js',
+            'warranty-form' => ASG_PLUGIN_URL . 'assets/js/modules/warranty-form.js',
+            'reports' => ASG_PLUGIN_URL . 'assets/js/modules/reports.js',
+            'error-handler' => ASG_PLUGIN_URL . 'assets/js/modules/error-handler.js'
+        );
+    }
+
+    /**
+     * اجرای بهینه‌سازی فایل‌ها در صورت نیاز
+     */
+    public function maybe_optimize_assets() {
+        $css_hash = $this->get_files_hash($this->css_files);
+        $js_hash = $this->get_files_hash($this->js_files);
+        
+        $css_cache_file = $this->cache_dir . '/optimized-' . $css_hash . '.css';
+        $js_cache_file = $this->cache_dir . '/optimized-' . $js_hash . '.js';
+
+        // بررسی و بهینه‌سازی CSS
+        if (!file_exists($css_cache_file)) {
+            $this->optimize_css_files($css_cache_file);
+        }
+
+        // بررسی و بهینه‌سازی JS
+        if (!file_exists($js_cache_file)) {
+            $this->optimize_js_files($js_cache_file);
         }
     }
 
     /**
-     * اضافه کردن تنظیمات به هدر
+     * محاسبه هش فایل‌ها
      */
-    public function add_head_settings() {
-        // Preload فایل‌های مهم
-        echo '<link rel="preload" href="' . ASG_PLUGIN_URL . 'assets/css/optimized.min.css" as="style">';
-        echo '<link rel="preload" href="' . ASG_PLUGIN_URL . 'assets/js/dist/optimized.min.js" as="script">';
-        
-        // اضافه کردن DNS Prefetch
-        echo '<link rel="dns-prefetch" href="//ajax.googleapis.com">';
-        
-        // تنظیمات بهینه‌سازی
-        echo '<meta http-equiv="x-dns-prefetch-control" content="on">';
+    private function get_files_hash($files) {
+        $content = '';
+        foreach ($files as $file) {
+            $file_path = str_replace(ASG_PLUGIN_URL, ASG_PLUGIN_DIR, $file);
+            if (file_exists($file_path)) {
+                $content .= filemtime($file_path);
+            }
+        }
+        return md5($content);
     }
 
     /**
-     * اضافه کردن async/defer به اسکریپت‌ها
+     * بهینه‌سازی فایل‌های CSS
      */
-    public function add_async_defer_attributes($tag, $handle) {
-        // اضافه کردن async به فایل‌های غیر ضروری
-        if ('persian-datepicker' === $handle || 'asg-reports-scripts' === $handle) {
-            return str_replace(' src', ' async src', $tag);
-        }
+    private function optimize_css_files($cache_file) {
+        $combined_css = '';
         
-        // اضافه کردن defer به فایل اصلی
-        if ('asg-optimized-scripts' === $handle) {
-            return str_replace(' src', ' defer src', $tag);
+        foreach ($this->css_files as $handle => $file) {
+            $file_path = str_replace(ASG_PLUGIN_URL, ASG_PLUGIN_DIR, $file);
+            if (file_exists($file_path)) {
+                $css = file_get_contents($file_path);
+                
+                // حذف کامنت‌ها
+                $css = preg_replace('!/\*[^*]*\*+([^/][^*]*\*+)*/!', '', $css);
+                
+                // حذف فضاهای خالی
+                $css = str_replace(array("\r\n", "\r", "\n", "\t"), '', $css);
+                $css = preg_replace('/\s+/', ' ', $css);
+                
+                $combined_css .= $css;
+            }
         }
+
+        // ذخیره فایل بهینه‌شده
+        file_put_contents($cache_file, $combined_css);
         
-        return $tag;
+        // ایجاد نسخه مینیفای شده
+        $min_file = str_replace('.css', '.min.css', $cache_file);
+        file_put_contents($min_file, $combined_css);
     }
 
     /**
-     * بررسی صفحه گارانتی
+     * بهینه‌سازی فایل‌های JavaScript
      */
-    private function is_warranty_page() {
-        global $post;
+    private function optimize_js_files($cache_file) {
+        $combined_js = '';
         
-        if (is_singular()) {
-            return has_shortcode($post->post_content, 'warranty_form') ||
-                   has_shortcode($post->post_content, 'warranty_requests');
+        foreach ($this->js_files as $handle => $file) {
+            $file_path = str_replace(ASG_PLUGIN_URL, ASG_PLUGIN_DIR, $file);
+            if (file_exists($file_path)) {
+                $js = file_get_contents($file_path);
+                
+                // حذف کامنت‌ها
+                $js = preg_replace('/(?:(?:\/\*(?:[^*]|(?:\*+[^*\/]))*\*+\/)|(?:(?<!\:|\\\|\'|\")\/\/.*))/', '', $js);
+                
+                // حذف فضاهای خالی
+                $js = preg_replace('/\s+/', ' ', $js);
+                
+                $combined_js .= $js . ";\n";
+            }
         }
+
+        // ذخیره فایل بهینه‌شده
+        file_put_contents($cache_file, $combined_js);
         
-        return false;
+        // ایجاد نسخه مینیفای شده
+        $min_file = str_replace('.js', '.min.js', $cache_file);
+        file_put_contents($min_file, $combined_js);
     }
+
     /**
- * بررسی صفحه پیگیری گارانتی
- */
-private function is_guarantee_tracking_page() {
-    global $wp;
-    return home_url($wp->request) === home_url('my-account/guarantee-tracking');
-}
+     * پاکسازی فایل‌های کش
+     */
+    public function clear_cache() {
+        $files = glob($this->cache_dir . '/*');
+        foreach ($files as $file) {
+            if (is_file($file)) {
+                unlink($file);
+            }
+        }
+        return true;
+    }
+
+    /**
+     * دریافت آدرس فایل‌های بهینه‌شده
+     */
+    public function get_optimized_urls() {
+        $css_hash = $this->get_files_hash($this->css_files);
+        $js_hash = $this->get_files_hash($this->js_files);
+        
+        $upload_dir = wp_upload_dir();
+        
+        return array(
+            'css' => $upload_dir['baseurl'] . '/asg-cache/optimized-' . $css_hash . '.min.css',
+            'js' => $upload_dir['baseurl'] . '/asg-cache/optimized-' . $js_hash . '.min.js'
+        );
+    }
+
+    /**
+     * بررسی وجود فایل‌های بهینه‌شده
+     */
+    public function has_optimized_files() {
+        $css_hash = $this->get_files_hash($this->css_files);
+        $js_hash = $this->get_files_hash($this->js_files);
+        
+        $css_exists = file_exists($this->cache_dir . '/optimized-' . $css_hash . '.min.css');
+        $js_exists = file_exists($this->cache_dir . '/optimized-' . $js_hash . '.min.js');
+        
+        return $css_exists && $js_exists;
+    }
 }

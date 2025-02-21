@@ -1,10 +1,22 @@
 <?php
+if (!defined('ABSPATH')) {
+    exit('دسترسی مستقیم غیرمجاز است!');
+}
+
 /**
- * کلاس بهینه‌سازی عملکرد افزونه
+ * کلاس مدیریت عملکرد و بهینه‌سازی افزونه
  */
 class ASG_Performance {
     private static $instance = null;
-    
+    private $settings;
+    private $cache;
+    private $query_cache = array();
+    private $debug_mode = false;
+    private $performance_logs = array();
+
+    /**
+     * دریافت نمونه کلاس (الگوی Singleton)
+     */
     public static function instance() {
         if (is_null(self::$instance)) {
             self::$instance = new self();
@@ -12,204 +24,269 @@ class ASG_Performance {
         return self::$instance;
     }
 
+    /**
+     * سازنده کلاس
+     */
     public function __construct() {
-        // اضافه کردن هوک‌های مربوط به بهینه‌سازی
-        add_action('init', array($this, 'init_caching'));
-        add_action('wp_enqueue_scripts', array($this, 'optimize_assets'), 100);
-        add_filter('script_loader_tag', array($this, 'add_async_defer'), 10, 3);
-        add_action('wp_footer', array($this, 'dequeue_unnecessary_scripts'), 1);
-        
-        // فعال‌سازی فشرده‌سازی GZIP
-        $this->enable_gzip_compression();
+        $this->settings = get_option('asg_settings', array());
+        $this->cache = ASG_Cache::instance();
+        $this->debug_mode = defined('WP_DEBUG') && WP_DEBUG;
+
+        $this->init_hooks();
     }
 
     /**
-     * راه‌اندازی سیستم کش
+     * راه‌اندازی هوک‌ها
      */
-    public function init_caching() {
-        // تنظیم کش‌های پایه
-        wp_cache_add_global_groups(array('asg_global_cache'));
-        wp_cache_add_non_persistent_groups(array('asg_temp_cache'));
-
-        // کش کردن تنظیمات پرکاربرد
-        $this->cache_frequent_settings();
-    }
-
-    /**
-     * کش کردن تنظیمات پرکاربرد
-     */
-    private function cache_frequent_settings() {
-        $cache_key = 'asg_frequent_settings';
-        $settings = wp_cache_get($cache_key, 'asg_global_cache');
+    private function init_hooks() {
+        // بهینه‌سازی کوئری‌ها
+        add_action('pre_get_posts', array($this, 'optimize_queries'));
         
-        if (false === $settings) {
-            $settings = array(
-                'statuses' => get_option('asg_statuses'),
-                'file_types' => get_option('asg_allowed_file_types'),
-                'max_file_size' => get_option('asg_max_file_size'),
-                'email_settings' => get_option('asg_email_settings')
-            );
-            wp_cache_set($cache_key, $settings, 'asg_global_cache', 3600);
+        // کش کردن نتایج کوئری‌ها
+        add_filter('posts_request', array($this, 'maybe_cache_query'), 10, 2);
+        
+        // مانیتورینگ عملکرد
+        if ($this->debug_mode) {
+            add_action('all', array($this, 'log_hook_performance'), 1);
+            add_action('all', array($this, 'log_hook_performance_end'), 999);
         }
-        
-        return $settings;
     }
 
     /**
-     * بهینه‌سازی فایل‌های CSS و JavaScript
+     * بهینه‌سازی کوئری‌ها
      */
-    public function optimize_assets() {
-        global $wp_scripts, $wp_styles;
-
-        // فشرده‌سازی و ترکیب فایل‌های CSS
-        if (!is_admin()) {
-            // حذف نسخه از URL فایل‌ها
-            foreach ($wp_styles->registered as $handle => $style) {
-                $wp_styles->registered[$handle]->ver = null;
+    public function optimize_queries($query) {
+        if (!is_admin() && $query->is_main_query()) {
+            // تنظیم تعداد آیتم‌ها در هر صفحه
+            if (!empty($this->settings['items_per_page'])) {
+                $query->set('posts_per_page', intval($this->settings['items_per_page']));
             }
 
-            // اضافه کردن فایل‌های CSS بهینه شده
-            wp_enqueue_style(
-                'asg-optimized-styles',
-                ASG_PLUGIN_URL . 'assets/css/optimized.min.css',
-                array(),
-                ASG_VERSION
-            );
-        }
-
-        // بهینه‌سازی JavaScript
-        wp_deregister_script('jquery');
-        wp_register_script(
-            'jquery',
-            'https://code.jquery.com/jquery-3.6.0.min.js',
-            array(),
-            '3.6.0',
-            true
-        );
-        
-        // اضافه کردن فایل‌های JS بهینه شده
-        wp_enqueue_script(
-            'asg-optimized-scripts',
-            ASG_PLUGIN_URL . 'assets/js/optimized.min.js',
-            array('jquery'),
-            ASG_VERSION,
-            true
-        );
-    }
-
-    /**
-     * اضافه کردن async/defer به اسکریپت‌ها
-     */
-    public function add_async_defer($tag, $handle, $src) {
-        $async_scripts = array('asg-optimized-scripts', 'google-maps');
-        $defer_scripts = array('asg-analytics');
-
-        if (in_array($handle, $async_scripts)) {
-            return str_replace(' src', ' async src', $tag);
-        }
-        if (in_array($handle, $defer_scripts)) {
-            return str_replace(' src', ' defer src', $tag);
-        }
-        
-        return $tag;
-    }
-
-    /**
-     * حذف اسکریپت‌های غیرضروری
-     */
-    public function dequeue_unnecessary_scripts() {
-        if (!is_admin()) {
-            $unnecessary_scripts = array(
-                'wp-embed',
-                'jquery-migrate'
-            );
-            
-            foreach ($unnecessary_scripts as $script) {
-                wp_dequeue_script($script);
+            // بهینه‌سازی کوئری‌های مربوط به گارانتی
+            if (isset($query->query_vars['post_type']) && $query->query_vars['post_type'] === 'warranty') {
+                $query->set('no_found_rows', true);
+                $query->set('update_post_term_cache', false);
+                $query->set('update_post_meta_cache', false);
             }
         }
+
+        return $query;
     }
 
     /**
-     * فعال‌سازی فشرده‌سازی GZIP
+     * کش کردن نتایج کوئری
      */
-    private function enable_gzip_compression() {
-        if (!in_array('mod_deflate', apache_get_modules()) && !headers_sent()) {
-            ob_start('ob_gzhandler');
+    public function maybe_cache_query($request, $query) {
+        if (empty($this->settings['enable_cache'])) {
+            return $request;
+        }
+
+        // فقط کوئری‌های خواندن را کش کن
+        if (stripos($request, 'SELECT') !== 0) {
+            return $request;
+        }
+
+        $cache_key = 'query_' . md5($request);
+
+        // بررسی کش
+        $cached_result = $this->cache->get($cache_key, 'queries');
+        if ($cached_result !== false) {
+            $this->query_cache[$request] = $cached_result;
+            return false; // جلوگیری از اجرای کوئری
+        }
+
+        return $request;
+    }
+
+    /**
+     * ثبت زمان شروع اجرای هوک
+     */
+    public function log_hook_performance($hook) {
+        if (!isset($this->performance_logs[$hook])) {
+            $this->performance_logs[$hook] = array(
+                'start_time' => microtime(true),
+                'memory_start' => memory_get_usage(),
+                'count' => 1
+            );
+        } else {
+            $this->performance_logs[$hook]['count']++;
         }
     }
 
     /**
-     * بهینه‌سازی تصاویر
+     * ثبت زمان پایان اجرای هوک
      */
-    public function optimize_images($file_path) {
-        // بررسی وجود فایل
-        if (!file_exists($file_path)) {
-            return false;
-        }
-
-        // دریافت نوع فایل
-        $mime_type = mime_content_type($file_path);
-        
-        // بهینه‌سازی بر اساس نوع تصویر
-        switch ($mime_type) {
-            case 'image/jpeg':
-                $image = imagecreatefromjpeg($file_path);
-                imagejpeg($image, $file_path, 85); // کیفیت 85%
-                break;
-                
-            case 'image/png':
-                $image = imagecreatefrompng($file_path);
-                // حفظ شفافیت
-                imagealphablending($image, false);
-                imagesavealpha($image, true);
-                imagepng($image, $file_path, 6); // سطح فشرده‌سازی 6
-                break;
-        }
-        
-        if (isset($image)) {
-            imagedestroy($image);
-        }
-        
-        return true;
-    }
-
-    /**
-     * کش کردن نتایج API
-     */
-    public function cache_api_response($endpoint, $response, $expiration = 3600) {
-        $cache_key = 'asg_api_' . md5($endpoint);
-        wp_cache_set($cache_key, $response, 'asg_global_cache', $expiration);
-    }
-
-    /**
-     * پاکسازی کش
-     */
-    public function clear_cache($type = 'all') {
-        switch ($type) {
-            case 'api':
-                $this->clear_api_cache();
-                break;
-                
-            case 'settings':
-                wp_cache_delete('asg_frequent_settings', 'asg_global_cache');
-                break;
-                
-            case 'all':
-                wp_cache_flush();
-                break;
+    public function log_hook_performance_end($hook) {
+        if (isset($this->performance_logs[$hook])) {
+            $this->performance_logs[$hook]['end_time'] = microtime(true);
+            $this->performance_logs[$hook]['memory_end'] = memory_get_usage();
+            $this->performance_logs[$hook]['duration'] = 
+                $this->performance_logs[$hook]['end_time'] - 
+                $this->performance_logs[$hook]['start_time'];
+            $this->performance_logs[$hook]['memory_usage'] = 
+                $this->performance_logs[$hook]['memory_end'] - 
+                $this->performance_logs[$hook]['memory_start'];
         }
     }
 
     /**
-     * پاکسازی کش API
+     * بهینه‌سازی کوئری‌های دیتابیس
      */
-    private function clear_api_cache() {
+    public function optimize_db_queries($query) {
         global $wpdb;
-        $wpdb->query(
-            "DELETE FROM $wpdb->options 
-            WHERE option_name LIKE '_transient_asg_api_%' 
-            OR option_name LIKE '_transient_timeout_asg_api_%'"
+
+        // اضافه کردن ایندکس‌ها به جداول
+        $this->maybe_add_indexes();
+
+        // بهینه‌سازی جوین‌ها
+        if (stripos($query, 'JOIN') !== false) {
+            $query = $this->optimize_joins($query);
+        }
+
+        return $query;
+    }
+
+    /**
+     * افزودن ایندکس‌های مورد نیاز
+     */
+    private function maybe_add_indexes() {
+        global $wpdb;
+
+        $table = $wpdb->prefix . 'asg_guarantee_requests';
+        $indexes = $wpdb->get_results("SHOW INDEX FROM $table");
+        $existing_indexes = array();
+
+        foreach ($indexes as $index) {
+            $existing_indexes[] = $index->Column_name;
+        }
+
+        // افزودن ایندکس‌های ضروری
+        $required_indexes = array(
+            'product_id',
+            'user_id',
+            'status',
+            'created_at',
+            'expiry_date'
         );
+
+        foreach ($required_indexes as $column) {
+            if (!in_array($column, $existing_indexes)) {
+                $wpdb->query("ALTER TABLE $table ADD INDEX ($column)");
+            }
+        }
+    }
+
+    /**
+     * بهینه‌سازی جوین‌ها
+     */
+    private function optimize_joins($query) {
+        // استفاده از INNER JOIN به جای LEFT JOIN در صورت امکان
+        $query = str_replace('LEFT JOIN', 'INNER JOIN', $query);
+
+        // اضافه کردن شرط‌های WHERE قبل از JOIN
+        if (stripos($query, 'WHERE') > stripos($query, 'JOIN')) {
+            $parts = explode('WHERE', $query);
+            if (count($parts) === 2) {
+                $conditions = trim($parts[1]);
+                $join_pos = stripos($parts[0], 'JOIN');
+                $query = substr($parts[0], 0, $join_pos) . 
+                         'WHERE ' . $conditions . ' ' . 
+                         substr($parts[0], $join_pos);
+            }
+        }
+
+        return $query;
+    }
+
+    /**
+     * دریافت گزارش عملکرد
+     */
+    public function get_performance_report() {
+        if (!$this->debug_mode) {
+            return array();
+        }
+
+        $report = array(
+            'hooks' => array(),
+            'queries' => array(),
+            'memory' => array(
+                'peak' => memory_get_peak_usage(true),
+                'current' => memory_get_usage(true)
+            ),
+            'cache' => array(
+                'hits' => 0,
+                'misses' => 0,
+                'size' => 0
+            )
+        );
+
+        // آمار هوک‌ها
+        foreach ($this->performance_logs as $hook => $data) {
+            if (isset($data['duration'])) {
+                $report['hooks'][] = array(
+                    'hook' => $hook,
+                    'count' => $data['count'],
+                    'duration' => round($data['duration'] * 1000, 2), // تبدیل به میلی‌ثانیه
+                    'memory' => size_format($data['memory_usage'])
+                );
+            }
+        }
+
+        // آمار کش
+        if ($this->cache) {
+            $cache_stats = $this->cache->get_stats();
+            $report['cache'] = array_merge($report['cache'], $cache_stats);
+        }
+
+        return $report;
+    }
+
+    /**
+     * بهینه‌سازی لودینگ فایل‌ها
+     */
+    public function optimize_assets_loading($handle, $src) {
+        // حذف نسخه از URL فایل‌ها
+        if (strpos($src, 'ver=') !== false) {
+            $src = remove_query_arg('ver', $src);
+        }
+
+        // اضافه کردن async/defer به اسکریپت‌ها
+        if (strpos($handle, 'asg-') === 0) {
+            add_filter('script_loader_tag', function($tag, $handle) {
+                return str_replace(' src', ' async defer src', $tag);
+            }, 10, 2);
+        }
+
+        return $src;
+    }
+
+    /**
+     * پاکسازی دیتابیس
+     */
+    public function cleanup_database() {
+        global $wpdb;
+
+        // پاکسازی لاگ‌های قدیمی
+        $days = !empty($this->settings['log_retention_days']) ? 
+                intval($this->settings['log_retention_days']) : 30;
+
+        $wpdb->query(
+            $wpdb->prepare(
+                "DELETE FROM {$wpdb->prefix}asg_logs 
+                 WHERE created_at < DATE_SUB(NOW(), INTERVAL %d DAY)",
+                $days
+            )
+        );
+
+        // بهینه‌سازی جداول
+        $tables = array(
+            $wpdb->prefix . 'asg_guarantee_requests',
+            $wpdb->prefix . 'asg_logs',
+            $wpdb->prefix . 'asg_meta'
+        );
+
+        foreach ($tables as $table) {
+            $wpdb->query("OPTIMIZE TABLE $table");
+        }
     }
 }

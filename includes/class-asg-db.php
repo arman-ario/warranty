@@ -1,183 +1,381 @@
 <?php
 if (!defined('ABSPATH')) {
-    exit;
+    exit('دسترسی مستقیم غیرمجاز است!');
 }
 
+/**
+ * کلاس مدیریت دیتابیس افزونه
+ */
 class ASG_DB {
-    private $wpdb;
-    private $table_requests;
-    private $table_notes;
+    private static $instance = null;
+    private $db;
+    private $tables;
+    private $charset_collate;
 
+    /**
+     * دریافت نمونه کلاس (الگوی Singleton)
+     */
+    public static function instance() {
+        if (is_null(self::$instance)) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
+
+    /**
+     * سازنده کلاس
+     */
     public function __construct() {
         global $wpdb;
-        $this->wpdb = $wpdb;
-        $this->table_requests = $wpdb->prefix . 'asg_guarantee_requests';
-        $this->table_notes = $wpdb->prefix . 'asg_guarantee_notes';
+        $this->db = $wpdb;
+        $this->charset_collate = $this->db->get_charset_collate();
+        
+        // تعریف جدول‌های افزونه
+        $this->tables = array(
+            'guarantees' => $this->db->prefix . 'asg_guarantee_requests',
+            'logs' => $this->db->prefix . 'asg_logs',
+            'meta' => $this->db->prefix . 'asg_meta'
+        );
     }
 
     /**
-     * ایجاد جداول مورد نیاز
+     * ایجاد جداول دیتابیس
      */
-    public function create_tables() {
-        $charset_collate = $this->wpdb->get_charset_collate();
-
-        $sql_requests = "CREATE TABLE IF NOT EXISTS $this->table_requests (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            product_id INT NOT NULL,
-            user_id INT NOT NULL,
-            tamin_user_id INT,
-            defect_description TEXT,
-            expert_comment TEXT,
-            status VARCHAR(50),
-            receipt_day INT,
-            receipt_month VARCHAR(20),
-            receipt_year INT,
-            image_id INT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            KEY user_id_index (user_id),
-            KEY product_id_index (product_id),
-            KEY status_index (status),
-            KEY created_at_index (created_at)
-        ) $charset_collate;";
-
-        $sql_notes = "CREATE TABLE IF NOT EXISTS $this->table_notes (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            request_id INT NOT NULL,
-            note TEXT,
-            created_by INT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            KEY request_id_index (request_id),
-            KEY created_by_index (created_by)
-        ) $charset_collate;";
+    public static function create_tables() {
+        global $wpdb;
+        $charset_collate = $wpdb->get_charset_collate();
 
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
-        dbDelta($sql_requests);
-        dbDelta($sql_notes);
+
+        // جدول درخواست‌های گارانتی
+        $sql = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}asg_guarantee_requests (
+            id bigint(20) NOT NULL AUTO_INCREMENT,
+            product_id bigint(20) NOT NULL,
+            user_id bigint(20) NOT NULL,
+            serial_number varchar(100) NOT NULL,
+            purchase_date date NOT NULL,
+            expiry_date date NOT NULL,
+            status varchar(50) NOT NULL DEFAULT 'در انتظار بررسی',
+            notes text,
+            created_at datetime NOT NULL,
+            updated_at datetime NOT NULL,
+            PRIMARY KEY  (id),
+            KEY product_id (product_id),
+            KEY user_id (user_id),
+            KEY serial_number (serial_number),
+            KEY status (status)
+        ) $charset_collate;";
+        dbDelta($sql);
+
+        // جدول لاگ‌ها
+        $sql = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}asg_logs (
+            id bigint(20) NOT NULL AUTO_INCREMENT,
+            guarantee_id bigint(20) NOT NULL,
+            user_id bigint(20) NOT NULL,
+            action varchar(50) NOT NULL,
+            details text,
+            created_at datetime NOT NULL,
+            PRIMARY KEY  (id),
+            KEY guarantee_id (guarantee_id),
+            KEY user_id (user_id),
+            KEY action (action)
+        ) $charset_collate;";
+        dbDelta($sql);
+
+        // جدول متا
+        $sql = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}asg_meta (
+            id bigint(20) NOT NULL AUTO_INCREMENT,
+            guarantee_id bigint(20) NOT NULL,
+            meta_key varchar(255) NOT NULL,
+            meta_value longtext,
+            PRIMARY KEY  (id),
+            KEY guarantee_id (guarantee_id),
+            KEY meta_key (meta_key(191))
+        ) $charset_collate;";
+        dbDelta($sql);
     }
 
     /**
-     * دریافت درخواست‌های گارانتی با پیجینیشن
+     * حذف جداول دیتابیس
      */
-    public function get_requests($args = array(), $page = 1, $per_page = 20) {
-        $defaults = array(
-            'user_id' => '',
-            'product_id' => '',
-            'status' => '',
-            'date_from' => '',
-            'date_to' => '',
-            'search' => '',
-            'orderby' => 'created_at',
-            'order' => 'DESC'
-        );
-
-        $args = wp_parse_args($args, $defaults);
-        $where = array('1=1');
-        $prepare_values = array();
-
-        // اعمال فیلترها
-        if (!empty($args['user_id'])) {
-            $where[] = 'r.user_id = %d';
-            $prepare_values[] = $args['user_id'];
-        }
-
-        if (!empty($args['product_id'])) {
-            $where[] = 'r.product_id = %d';
-            $prepare_values[] = $args['product_id'];
-        }
-
-        if (!empty($args['status'])) {
-            $where[] = 'r.status = %s';
-            $prepare_values[] = $args['status'];
-        }
-
-        if (!empty($args['date_from'])) {
-            $where[] = 'r.created_at >= %s';
-            $prepare_values[] = $args['date_from'];
-        }
-
-        if (!empty($args['date_to'])) {
-            $where[] = 'r.created_at <= %s';
-            $prepare_values[] = $args['date_to'];
-        }
-
-        if (!empty($args['search'])) {
-            $where[] = '(r.defect_description LIKE %s OR r.expert_comment LIKE %s)';
-            $prepare_values[] = '%' . $this->wpdb->esc_like($args['search']) . '%';
-            $prepare_values[] = '%' . $this->wpdb->esc_like($args['search']) . '%';
-        }
-
-        $offset = ($page - 1) * $per_page;
-        $where_clause = implode(' AND ', $where);
+    public static function drop_tables() {
+        global $wpdb;
         
-        $query = $this->wpdb->prepare(
-            "SELECT SQL_CALC_FOUND_ROWS r.*
-            FROM {$this->table_requests} r
-            WHERE {$where_clause}
-            ORDER BY r.{$args['orderby']} {$args['order']}
-            LIMIT %d OFFSET %d",
-            array_merge($prepare_values, array($per_page, $offset))
-        );
-
-        $results = $this->wpdb->get_results($query);
-        $total = $this->wpdb->get_var('SELECT FOUND_ROWS()');
-
-        return array(
-            'items' => $results,
-            'total' => $total,
-            'pages' => ceil($total / $per_page)
-        );
+        $wpdb->query("DROP TABLE IF EXISTS {$wpdb->prefix}asg_guarantee_requests");
+        $wpdb->query("DROP TABLE IF EXISTS {$wpdb->prefix}asg_logs");
+        $wpdb->query("DROP TABLE IF EXISTS {$wpdb->prefix}asg_meta");
     }
 
     /**
-     * افزودن درخواست جدید
+     * درج گارانتی جدید
      */
-    public function add_request($data) {
-        $result = $this->wpdb->insert($this->table_requests, $data);
-        return $result ? $this->wpdb->insert_id : false;
-    }
+    public function insert_guarantee($data) {
+        $defaults = array(
+            'created_at' => current_time('mysql'),
+            'updated_at' => current_time('mysql')
+        );
 
-    /**
-     * به‌روزرسانی درخواست
-     */
-    public function update_request($id, $data) {
-        return $this->wpdb->update(
-            $this->table_requests,
+        $data = wp_parse_args($data, $defaults);
+
+        // محاسبه تاریخ انقضا
+        if (!isset($data['expiry_date']) && isset($data['purchase_date'])) {
+            $warranty_duration = get_option('asg_settings')['default_warranty_duration'];
+            $data['expiry_date'] = date('Y-m-d', strtotime($data['purchase_date'] . " +{$warranty_duration} months"));
+        }
+
+        $result = $this->db->insert(
+            $this->tables['guarantees'],
             $data,
-            array('id' => $id)
+            array(
+                '%d', // product_id
+                '%d', // user_id
+                '%s', // serial_number
+                '%s', // purchase_date
+                '%s', // expiry_date
+                '%s', // status
+                '%s', // notes
+                '%s', // created_at
+                '%s'  // updated_at
+            )
+        );
+
+        if ($result) {
+            $guarantee_id = $this->db->insert_id;
+            
+            // ثبت لاگ
+            $this->log_action($guarantee_id, 'create', 'گارانتی جدید ایجاد شد');
+            
+            return $guarantee_id;
+        }
+
+        return false;
+    }
+
+    /**
+     * بروزرسانی گارانتی
+     */
+    public function update_guarantee($id, $data) {
+        $data['updated_at'] = current_time('mysql');
+
+        $result = $this->db->update(
+            $this->tables['guarantees'],
+            $data,
+            array('id' => $id),
+            array(
+                '%s', // status
+                '%s', // notes
+                '%s'  // updated_at
+            ),
+            array('%d')
+        );
+
+        if ($result) {
+            // ثبت لاگ
+            $this->log_action($id, 'update', 'گارانتی بروزرسانی شد');
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * حذف گارانتی
+     */
+    public function delete_guarantee($id) {
+        // حذف متاها
+        $this->db->delete($this->tables['meta'], array('guarantee_id' => $id), array('%d'));
+        
+        // حذف لاگ‌ها
+        $this->db->delete($this->tables['logs'], array('guarantee_id' => $id), array('%d'));
+        
+        // حذف گارانتی
+        return $this->db->delete(
+            $this->tables['guarantees'],
+            array('id' => $id),
+            array('%d')
         );
     }
 
     /**
-     * حذف درخواست
+     * دریافت گارانتی
      */
-    public function delete_request($id) {
-        return $this->wpdb->delete(
-            $this->table_requests,
-            array('id' => $id)
-        );
-    }
-
-    /**
-     * افزودن یادداشت
-     */
-    public function add_note($data) {
-        $result = $this->wpdb->insert($this->table_notes, $data);
-        return $result ? $this->wpdb->insert_id : false;
-    }
-
-    /**
-     * دریافت یادداشت‌های یک درخواست
-     */
-    public function get_notes($request_id) {
-        return $this->wpdb->get_results(
-            $this->wpdb->prepare(
-                "SELECT * FROM {$this->table_notes}
-                WHERE request_id = %d
-                ORDER BY created_at DESC",
-                $request_id
+    public function get_guarantee($id) {
+        return $this->db->get_row(
+            $this->db->prepare(
+                "SELECT * FROM {$this->tables['guarantees']} WHERE id = %d",
+                $id
             )
         );
     }
+
+    /**
+     * جستجوی گارانتی‌ها
+     */
+    public function search_guarantees($args = array()) {
+        $defaults = array(
+            'page' => 1,
+            'per_page' => 10,
+            'orderby' => 'created_at',
+            'order' => 'DESC',
+            'status' => '',
+            'product_id' => '',
+            'user_id' => '',
+            'search' => '',
+            'date_from' => '',
+            'date_to' => ''
+        );
+
+        $args = wp_parse_args($args, $defaults);
+        $offset = ($args['page'] - 1) * $args['per_page'];
+        
+        $where = array();
+        $values = array();
+
+        if (!empty($args['status'])) {
+            $where[] = 'status = %s';
+            $values[] = $args['status'];
+        }
+
+        if (!empty($args['product_id'])) {
+            $where[] = 'product_id = %d';
+            $values[] = $args['product_id'];
+        }
+
+        if (!empty($args['user_id'])) {
+            $where[] = 'user_id = %d';
+            $values[] = $args['user_id'];
+        }
+
+        if (!empty($args['search'])) {
+            $where[] = '(serial_number LIKE %s OR notes LIKE %s)';
+            $values[] = '%' . $this->db->esc_like($args['search']) . '%';
+            $values[] = '%' . $this->db->esc_like($args['search']) . '%';
+        }
+
+        if (!empty($args['date_from'])) {
+            $where[] = 'created_at >= %s';
+            $values[] = $args['date_from'];
+        }
+
+        if (!empty($args['date_to'])) {
+            $where[] = 'created_at <= %s';
+            $values[] = $args['date_to'];
+        }
+
+        $where_clause = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
+        
+        $query = "SELECT * FROM {$this->tables['guarantees']} 
+                 $where_clause
+                 ORDER BY {$args['orderby']} {$args['order']}
+                 LIMIT %d OFFSET %d";
+
+        $values[] = $args['per_page'];
+        $values[] = $offset;
+
+        return array(
+            'items' => $this->db->get_results($this->db->prepare($query, $values)),
+            'total' => $this->get_total_guarantees($where, array_slice($values, 0, -2))
+        );
+    }
+
+    /**
+     * دریافت تعداد کل گارانتی‌ها
+     */
+    private function get_total_guarantees($where = array(), $values = array()) {
+        $where_clause = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
+        
+        $query = "SELECT COUNT(*) FROM {$this->tables['guarantees']} $where_clause";
+        
+        return $this->db->get_var($this->db->prepare($query, $values));
+    }
+
+    /**
+     * ثبت لاگ
+     */
+    private function log_action($guarantee_id, $action, $details = '') {
+        return $this->db->insert(
+            $this->tables['logs'],
+            array(
+                'guarantee_id' => $guarantee_id,
+                'user_id' => get_current_user_id(),
+                'action' => $action,
+                'details' => $details,
+                'created_at' => current_time('mysql')
+            ),
+            array(
+                '%d', // guarantee_id
+                '%d', // user_id
+                '%s', // action
+                '%s', // details
+                '%s'  // created_at
+            )
+        );
+    }
+
+    /**
+     * افزودن متا
+     */
+    public function add_meta($guarantee_id, $key, $value) {
+        return $this->db->insert(
+            $this->tables['meta'],
+            array(
+                'guarantee_id' => $guarantee_id,
+                'meta_key' => $key,
+                'meta_value' => maybe_serialize($value)
+            ),
+            array('%d', '%s', '%s')
+        );
+    }
+
+    /**
+     * دریافت متا
+     */
+    public function get_meta($guarantee_id, $key) {
+        $value = $this->db->get_var(
+            $this->db->prepare(
+                "SELECT meta_value FROM {$this->tables['meta']} 
+                 WHERE guarantee_id = %d AND meta_key = %s",
+                $guarantee_id,
+                $key
+            )
+        );
+        
+        return maybe_unserialize($value);
+    }
+
+    /**
+     * بروزرسانی متا
+     */
+    public function update_meta($guarantee_id, $key, $value) {
+        $current = $this->get_meta($guarantee_id, $key);
+        
+        if (is_null($current)) {
+            return $this->add_meta($guarantee_id, $key, $value);
+        }
+
+        return $this->db->update(
+            $this->tables['meta'],
+            array('meta_value' => maybe_serialize($value)),
+            array(
+                'guarantee_id' => $guarantee_id,
+                'meta_key' => $key
+            ),
+            array('%s'),
+            array('%d', '%s')
+        );
+    }
+
+    /**
+     * حذف متا
+     */
+    public function delete_meta($guarantee_id, $key) {
+        return $this->db->delete(
+            $this->tables['meta'],
+            array(
+                'guarantee_id' => $guarantee_id,
+                'meta_key' => $key
+            ),
+            array('%d', '%s')
+        );
+    }
 }
-?>

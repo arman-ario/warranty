@@ -1,247 +1,282 @@
 <?php
+if (!defined('ABSPATH')) {
+    exit('دسترسی مستقیم غیرمجاز است!');
+}
+
 /**
- * کلاس امنیتی افزونه
+ * کلاس مدیریت امنیت افزونه
  */
 class ASG_Security {
+    private static $instance = null;
+    private $settings;
+    private $db;
+    private $failed_attempts = array();
+    private $blocked_ips = array();
+
     /**
-     * نام nonce
+     * دریافت نمونه کلاس (الگوی Singleton)
      */
-    const NONCE_NAME = 'asg_nonce';
-    const NONCE_ACTION = 'asg_security';
+    public static function instance() {
+        if (is_null(self::$instance)) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
 
     /**
      * سازنده کلاس
      */
     public function __construct() {
-        // اضافه کردن فیلتر برای اعتبارسنجی داده‌ها
-        add_filter('asg_validate_input', array($this, 'validate_input'), 10, 2);
-    }
-
-    /**
-     * ایجاد nonce برای فرم‌ها
-     */
-    public static function create_nonce_field() {
-        wp_nonce_field(self::NONCE_ACTION, self::NONCE_NAME);
-    }
-
-    /**
-     * بررسی nonce در درخواست‌ها
-     */
-    public static function verify_nonce($nonce = null) {
-        if (is_null($nonce)) {
-            $nonce = isset($_REQUEST[self::NONCE_NAME]) ? $_REQUEST[self::NONCE_NAME] : '';
-        }
-        return wp_verify_nonce($nonce, self::NONCE_ACTION);
-    }
-
-    /**
-     * اعتبارسنجی داده‌های ورودی
-     */
-    public function validate_input($input, $type = 'text') {
-        switch ($type) {
-            case 'text':
-                return $this->sanitize_text($input);
-            
-            case 'textarea':
-                return $this->sanitize_textarea($input);
-            
-            case 'email':
-                return $this->sanitize_email($input);
-            
-            case 'number':
-                return $this->sanitize_number($input);
-            
-            case 'url':
-                return $this->sanitize_url($input);
-            
-            case 'file':
-                return $this->validate_file($input);
-            
-            default:
-                return $this->sanitize_text($input);
-        }
-    }
-
-    /**
-     * پاکسازی متن ساده
-     */
-    private function sanitize_text($input) {
-        if (is_array($input)) {
-            return array_map(array($this, 'sanitize_text'), $input);
-        }
-        return sanitize_text_field($input);
-    }
-
-    /**
-     * پاکسازی متن چند خطی
-     */
-    private function sanitize_textarea($input) {
-        return sanitize_textarea_field($input);
-    }
-
-    /**
-     * پاکسازی ایمیل
-     */
-    private function sanitize_email($input) {
-        $email = sanitize_email($input);
-        return is_email($email) ? $email : '';
-    }
-
-    /**
-     * پاکسازی اعداد
-     */
-    private function sanitize_number($input) {
-        if (is_numeric($input)) {
-            return intval($input);
-        }
-        return 0;
-    }
-
-    /**
-     * پاکسازی URL
-     */
-    private function sanitize_url($input) {
-        return esc_url_raw($input);
-    }
-
-    /**
-     * اعتبارسنجی فایل
-     */
-    private function validate_file($file) {
-        if (!isset($file['tmp_name']) || empty($file['tmp_name'])) {
-            return false;
-        }
-
-        // بررسی پسوند فایل
-        $allowed_types = array('jpg', 'jpeg', 'png', 'pdf');
-        $file_type = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+        global $wpdb;
+        $this->db = $wpdb;
+        $this->settings = get_option('asg_settings', array());
         
-        if (!in_array($file_type, $allowed_types)) {
-            return false;
+        $this->init_hooks();
+        $this->load_blocked_ips();
+    }
+
+    /**
+     * راه‌اندازی هوک‌ها
+     */
+    private function init_hooks() {
+        // فیلترهای امنیتی
+        add_filter('asg_validate_serial_number', array($this, 'validate_serial_number'), 10, 1);
+        add_filter('asg_before_warranty_save', array($this, 'sanitize_warranty_data'), 10, 1);
+        
+        // اکشن‌های امنیتی
+        add_action('init', array($this, 'check_ip_block'));
+        add_action('wp_login_failed', array($this, 'log_failed_login'));
+        add_action('wp_login', array($this, 'clear_failed_attempts'), 10, 2);
+        
+        // محدودیت درخواست‌ها
+        add_action('init', array($this, 'rate_limit_requests'));
+    }
+
+    /**
+     * بارگذاری لیست IP های مسدود شده
+     */
+    private function load_blocked_ips() {
+        $this->blocked_ips = get_option('asg_blocked_ips', array());
+    }
+
+    /**
+     * اعتبارسنجی شماره سریال
+     */
+    public function validate_serial_number($serial) {
+        // پاکسازی شماره سریال
+        $serial = sanitize_text_field($serial);
+        
+        // بررسی فرمت
+        if (!preg_match('/^[A-Z0-9]{8,16}$/', $serial)) {
+            return new WP_Error('invalid_serial', 'فرمت شماره سریال نامعتبر است.');
         }
 
-        // بررسی حجم فایل (حداکثر 2MB)
-        $max_size = 2 * 1024 * 1024; // 2MB
-        if ($file['size'] > $max_size) {
-            return false;
-        }
-
-        // بررسی نوع واقعی فایل
-        $finfo = finfo_open(FILEINFO_MIME_TYPE);
-        $mime_type = finfo_file($finfo, $file['tmp_name']);
-        finfo_close($finfo);
-
-        $allowed_mimes = array(
-            'image/jpeg',
-            'image/png',
-            'application/pdf'
+        // بررسی تکراری نبودن
+        $exists = $this->db->get_var(
+            $this->db->prepare(
+                "SELECT COUNT(*) FROM {$this->db->prefix}asg_guarantee_requests 
+                 WHERE serial_number = %s",
+                $serial
+            )
         );
 
-        if (!in_array($mime_type, $allowed_mimes)) {
-            return false;
+        if ($exists) {
+            return new WP_Error('duplicate_serial', 'این شماره سریال قبلاً ثبت شده است.');
         }
 
-        return true;
+        return $serial;
     }
-
-   /**
- * تولید توکن امن با استفاده از کش
- */
-public static function generate_token($length = 32) {
-    $cache_key = 'asg_security_token_' . $length;
-    $token = wp_cache_get($cache_key);
-    
-    if (false === $token) {
-        $token = bin2hex(random_bytes($length));
-        wp_cache_set($cache_key, $token, '', 3600); // کش برای یک ساعت
-    }
-    
-    return $token;
-}
-
 
     /**
-     * رمزنگاری داده
+     * پاکسازی داده‌های گارانتی
      */
-    public static function encrypt_data($data, $key = null) {
-        if (is_null($key)) {
-            $key = wp_salt('auth');
+    public function sanitize_warranty_data($data) {
+        $clean_data = array();
+        
+        // پاکسازی فیلدها
+        if (isset($data['product_id'])) {
+            $clean_data['product_id'] = absint($data['product_id']);
         }
         
-        $method = "AES-256-CBC";
-        $iv = random_bytes(16);
-        $encrypted = openssl_encrypt($data, $method, $key, 0, $iv);
+        if (isset($data['user_id'])) {
+            $clean_data['user_id'] = absint($data['user_id']);
+        }
         
-        return base64_encode($iv . $encrypted);
+        if (isset($data['serial_number'])) {
+            $clean_data['serial_number'] = sanitize_text_field($data['serial_number']);
+        }
+        
+        if (isset($data['purchase_date'])) {
+            $clean_data['purchase_date'] = sanitize_text_field($data['purchase_date']);
+        }
+        
+        if (isset($data['status'])) {
+            $clean_data['status'] = sanitize_text_field($data['status']);
+        }
+        
+        if (isset($data['notes'])) {
+            $clean_data['notes'] = wp_kses_post($data['notes']);
+        }
+
+        return $clean_data;
     }
 
     /**
-     * رمزگشایی داده
+     * بررسی مسدود بودن IP
      */
-    public static function decrypt_data($encrypted_data, $key = null) {
-        if (is_null($key)) {
-            $key = wp_salt('auth');
-        }
-
-        $data = base64_decode($encrypted_data);
-        $method = "AES-256-CBC";
-        $iv = substr($data, 0, 16);
-        $encrypted = substr($data, 16);
+    public function check_ip_block() {
+        $ip = $this->get_client_ip();
         
-        return openssl_decrypt($encrypted, $method, $key, 0, $iv);
+        if (in_array($ip, $this->blocked_ips)) {
+            wp_die('دسترسی شما به دلیل فعالیت مشکوک مسدود شده است.');
+        }
     }
 
     /**
- * محدودسازی درخواست‌ها با استفاده از کش object
- */
-public static function rate_limit($key, $limit = 60, $period = 3600) {
-    $cache_key = 'asg_rate_' . $key;
-    $current = wp_cache_get($cache_key);
-    
-    if (false === $current) {
-        wp_cache_add($cache_key, 1, '', $period);
-        return true;
+     * ثبت تلاش‌های ناموفق ورود
+     */
+    public function log_failed_login($username) {
+        $ip = $this->get_client_ip();
+        
+        if (!isset($this->failed_attempts[$ip])) {
+            $this->failed_attempts[$ip] = array(
+                'count' => 1,
+                'first_attempt' => time()
+            );
+        } else {
+            $this->failed_attempts[$ip]['count']++;
+        }
+
+        // بررسی تعداد تلاش‌های ناموفق
+        if ($this->failed_attempts[$ip]['count'] >= 5) {
+            $this->block_ip($ip);
+        }
+
+        update_option('asg_failed_login_attempts', $this->failed_attempts);
     }
-    
-    if ($current >= $limit) {
+
+    /**
+     * پاک کردن تلاش‌های ناموفق بعد از ورود موفق
+     */
+    public function clear_failed_attempts($user_login, $user) {
+        $ip = $this->get_client_ip();
+        
+        if (isset($this->failed_attempts[$ip])) {
+            unset($this->failed_attempts[$ip]);
+            update_option('asg_failed_login_attempts', $this->failed_attempts);
+        }
+    }
+
+    /**
+     * محدودیت تعداد درخواست‌ها
+     */
+    public function rate_limit_requests() {
+        if (!$this->is_warranty_endpoint()) {
+            return;
+        }
+
+        $ip = $this->get_client_ip();
+        $rate_key = 'asg_rate_limit_' . $ip;
+        $current_time = time();
+        
+        $requests = get_transient($rate_key);
+        
+        if ($requests === false) {
+            set_transient($rate_key, array(
+                'count' => 1,
+                'timestamp' => $current_time
+            ), 3600);
+        } else {
+            if ($current_time - $requests['timestamp'] < 60 && $requests['count'] > 10) {
+                wp_die('تعداد درخواست‌های شما بیش از حد مجاز است. لطفاً کمی صبر کنید.');
+            }
+            
+            $requests['count']++;
+            set_transient($rate_key, $requests, 3600);
+        }
+    }
+
+    /**
+     * مسدود کردن IP
+     */
+    private function block_ip($ip) {
+        if (!in_array($ip, $this->blocked_ips)) {
+            $this->blocked_ips[] = $ip;
+            update_option('asg_blocked_ips', $this->blocked_ips);
+            
+            // ثبت در لاگ
+            $this->log_security_event('ip_blocked', array(
+                'ip' => $ip,
+                'reason' => 'تلاش‌های ناموفق متعدد برای ورود'
+            ));
+        }
+    }
+
+    /**
+     * دریافت IP کاربر
+     */
+    private function get_client_ip() {
+        $ip = '';
+        
+        if (isset($_SERVER['HTTP_CLIENT_IP'])) {
+            $ip = $_SERVER['HTTP_CLIENT_IP'];
+        } elseif (isset($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $ip = $_SERVER['HTTP_X_FORWARDED_FOR'];
+        } elseif (isset($_SERVER['REMOTE_ADDR'])) {
+            $ip = $_SERVER['REMOTE_ADDR'];
+        }
+        
+        return filter_var($ip, FILTER_VALIDATE_IP);
+    }
+
+    /**
+     * بررسی endpoint گارانتی
+     */
+    private function is_warranty_endpoint() {
+        if (isset($_SERVER['REQUEST_URI'])) {
+            return strpos($_SERVER['REQUEST_URI'], '/warranty') !== false ||
+                   strpos($_SERVER['REQUEST_URI'], '/guarantee') !== false;
+        }
         return false;
     }
-    
-    wp_cache_incr($cache_key);
-    return true;
-}
-}
 
-// نمونه استفاده در فرم‌ها
-/*
-<form method="post" action="">
-    <?php ASG_Security::create_nonce_field(); ?>
-    <!-- فیلدهای فرم -->
-</form>
-*/
+    /**
+     * ثبت رویدادهای امنیتی
+     */
+    private function log_security_event($event, $data = array()) {
+        $log = array(
+            'event' => $event,
+            'data' => $data,
+            'ip' => $this->get_client_ip(),
+            'user_id' => get_current_user_id(),
+            'timestamp' => current_time('mysql')
+        );
 
-// نمونه استفاده در AJAX
-/*
-add_action('wp_ajax_asg_action', 'handle_ajax_request');
-function handle_ajax_request() {
-    // بررسی nonce
-    if (!ASG_Security::verify_nonce()) {
-        wp_send_json_error('درخواست نامعتبر است.');
+        $this->db->insert(
+            $this->db->prefix . 'asg_logs',
+            array(
+                'action' => 'security_' . $event,
+                'details' => maybe_serialize($log),
+                'created_at' => current_time('mysql')
+            ),
+            array('%s', '%s', '%s')
+        );
     }
 
-    // اعتبارسنجی داده‌ها
-    $security = new ASG_Security();
-    $name = $security->validate_input($_POST['name']);
-    $email = $security->validate_input($_POST['email'], 'email');
-    
-    // پردازش درخواست
-    // ...
-}
-*/
+    /**
+     * پاکسازی لاگ‌های قدیمی
+     */
+    public function cleanup_logs() {
+        $days = !empty($this->settings['security_log_retention']) ? 
+                intval($this->settings['security_log_retention']) : 30;
 
-// نمونه استفاده از رمزنگاری
-/*
-$sensitive_data = 'داده حساس';
-$encrypted = ASG_Security::encrypt_data($sensitive_data);
-$decrypted = ASG_Security::decrypt_data($encrypted);
-*/
+        $this->db->query(
+            $this->db->prepare(
+                "DELETE FROM {$this->db->prefix}asg_logs 
+                 WHERE action LIKE 'security_%' 
+                 AND created_at < DATE_SUB(NOW(), INTERVAL %d DAY)",
+                $days
+            )
+        );
+    }
+}

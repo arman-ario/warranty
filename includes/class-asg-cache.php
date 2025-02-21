@@ -1,131 +1,259 @@
 <?php
 if (!defined('ABSPATH')) {
-    exit;
+    exit('دسترسی مستقیم غیرمجاز است!');
 }
 
+/**
+ * کلاس مدیریت کش افزونه
+ */
 class ASG_Cache {
-    private $cache_group = 'asg_cache';
+    private static $instance = null;
+    private $cache_dir;
     private $cache_time = 3600; // یک ساعت
-    private $user_cache_group;
+    private $settings;
 
+    /**
+     * دریافت نمونه کلاس (الگوی Singleton)
+     */
+    public static function instance() {
+        if (is_null(self::$instance)) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
+
+    /**
+     * سازنده کلاس
+     */
     public function __construct() {
-        // تنظیم گروه کش برای هر کاربر
-        $this->user_cache_group = $this->cache_group . '_' . get_current_user_id();
+        $this->settings = get_option('asg_settings', array());
+        $upload_dir = wp_upload_dir();
+        $this->cache_dir = $upload_dir['basedir'] . '/asg-cache';
+
+        // ایجاد دایرکتوری کش
+        if (!file_exists($this->cache_dir)) {
+            wp_mkdir_p($this->cache_dir);
+        }
+
+        // تنظیم زمان کش از تنظیمات
+        if (!empty($this->settings['cache_time'])) {
+            $this->cache_time = intval($this->settings['cache_time']) * 60; // تبدیل دقیقه به ثانیه
+        }
+
+        $this->init_hooks();
+    }
+
+    /**
+     * راه‌اندازی هوک‌ها
+     */
+    private function init_hooks() {
+        // پاکسازی خودکار کش
+        add_action('asg_daily_cleanup', array($this, 'auto_cleanup'));
         
-        // پاک کردن کش در هنگام به‌روزرسانی گارانتی
-        add_action('asg_after_guarantee_update', array($this, 'clear_guarantee_cache'));
-        add_action('asg_after_guarantee_delete', array($this, 'clear_guarantee_cache'));
-        add_action('asg_after_note_add', array($this, 'clear_notes_cache'));
-    }
+        // هوک اکشن‌های مختلف برای پاکسازی کش
+        $this->register_cache_cleanup_hooks();
 
-    /**
-     * دریافت مقدار از کش
-     */
-    public function get($key, $user_specific = false) {
-        $group = $user_specific ? $this->user_cache_group : $this->cache_group;
-        return wp_cache_get($key, $group);
-    }
-
-    /**
-     * ذخیره مقدار در کش
-     */
-    public function set($key, $value, $user_specific = false) {
-        $group = $user_specific ? $this->user_cache_group : $this->cache_group;
-        return wp_cache_set($key, $value, $group, $this->cache_time);
-    }
-
-    /**
-     * حذف یک مقدار از کش
-     */
-    public function delete($key, $user_specific = false) {
-        $group = $user_specific ? $this->user_cache_group : $this->cache_group;
-        return wp_cache_delete($key, $group);
-    }
-
-    /**
-     * پاک کردن کش گارانتی
-     */
-    public function clear_guarantee_cache($guarantee_id = null) {
-        if ($guarantee_id) {
-            $this->delete('guarantee_' . $guarantee_id);
-            $this->delete('guarantee_notes_' . $guarantee_id);
-        } else {
-            // پاک کردن تمام کش‌های مرتبط با گارانتی
-            wp_cache_flush();
+        // اگر کش غیرفعال است، کل کش را پاک کن
+        if (empty($this->settings['enable_cache'])) {
+            $this->clear_all();
         }
     }
 
     /**
-     * پاک کردن کش یادداشت‌ها
+     * ثبت هوک‌های پاکسازی کش
      */
-    public function clear_notes_cache($request_id) {
-        $this->delete('guarantee_notes_' . $request_id);
+    private function register_cache_cleanup_hooks() {
+        $actions = array(
+            'save_post',
+            'deleted_post',
+            'switched_theme',
+            'wp_update_nav_menu',
+            'update_option_permalink_structure',
+            'updated_option'
+        );
+
+        foreach ($actions as $action) {
+            add_action($action, array($this, 'clear_all'));
+        }
+
+        // هوک‌های مخصوص افزونه
+        add_action('asg_warranty_created', array($this, 'clear_warranties_cache'));
+        add_action('asg_warranty_updated', array($this, 'clear_warranties_cache'));
+        add_action('asg_warranty_deleted', array($this, 'clear_warranties_cache'));
     }
 
     /**
-     * کش کردن نتایج جستجو
+     * ذخیره داده در کش
      */
-    public function get_search_results($type, $query, $args = array()) {
-        $cache_key = 'search_' . $type . '_' . md5($query . serialize($args));
-        $results = $this->get($cache_key, true);
+    public function set($key, $data, $group = 'default', $expire = null) {
+        if (empty($this->settings['enable_cache'])) {
+            return false;
+        }
 
-        if ($results === false) {
-            switch ($type) {
-                case 'products':
-                    $results = $this->search_products($query, $args);
-                    break;
-                case 'users':
-                    $results = $this->search_users($query, $args);
-                    break;
+        $cache_file = $this->get_cache_file_path($key, $group);
+        $expire = is_null($expire) ? time() + $this->cache_time : time() + $expire;
+
+        $cache_data = array(
+            'data' => $data,
+            'expire' => $expire
+        );
+
+        return file_put_contents($cache_file, serialize($cache_data)) !== false;
+    }
+
+    /**
+     * دریافت داده از کش
+     */
+    public function get($key, $group = 'default') {
+        if (empty($this->settings['enable_cache'])) {
+            return false;
+        }
+
+        $cache_file = $this->get_cache_file_path($key, $group);
+
+        if (!file_exists($cache_file)) {
+            return false;
+        }
+
+        $cache_data = unserialize(file_get_contents($cache_file));
+
+        if (!is_array($cache_data) || !isset($cache_data['expire']) || !isset($cache_data['data'])) {
+            return false;
+        }
+
+        if (time() > $cache_data['expire']) {
+            unlink($cache_file);
+            return false;
+        }
+
+        return $cache_data['data'];
+    }
+
+    /**
+     * حذف یک آیتم از کش
+     */
+    public function delete($key, $group = 'default') {
+        $cache_file = $this->get_cache_file_path($key, $group);
+        
+        if (file_exists($cache_file)) {
+            return unlink($cache_file);
+        }
+        
+        return false;
+    }
+
+    /**
+     * پاکسازی کل کش
+     */
+    public function clear_all() {
+        $files = glob($this->cache_dir . '/*');
+        
+        foreach ($files as $file) {
+            if (is_file($file)) {
+                unlink($file);
             }
-            $this->set($cache_key, $results, true);
         }
-
-        return $results;
+        
+        return true;
     }
 
     /**
-     * جستجوی محصولات
+     * پاکسازی کش گارانتی‌ها
      */
-    private function search_products($query, $args = array()) {
-        $products = wc_get_products(array(
-            'status' => 'publish',
-            'limit' => isset($args['limit']) ? $args['limit'] : 10,
-            's' => $query
-        ));
-
-        $results = array();
-        foreach ($products as $product) {
-            $results[] = array(
-                'id' => $product->get_id(),
-                'text' => $product->get_name(),
-                'price' => $product->get_price(),
-                'sku' => $product->get_sku()
-            );
+    public function clear_warranties_cache() {
+        $files = glob($this->cache_dir . '/warranties-*');
+        
+        foreach ($files as $file) {
+            if (is_file($file)) {
+                unlink($file);
+            }
         }
-
-        return $results;
+        
+        return true;
     }
 
     /**
-     * جستجوی کاربران
+     * پاکسازی خودکار کش
      */
-    private function search_users($query, $args = array()) {
-        $users = get_users(array(
-            'search' => '*' . $query . '*',
-            'number' => isset($args['limit']) ? $args['limit'] : 10,
-            'role' => isset($args['role']) ? $args['role'] : ''
-        ));
+    public function auto_cleanup() {
+        $files = glob($this->cache_dir . '/*');
+        $now = time();
+        
+        foreach ($files as $file) {
+            if (is_file($file)) {
+                $cache_data = unserialize(file_get_contents($file));
+                
+                if (!is_array($cache_data) || 
+                    !isset($cache_data['expire']) || 
+                    $now > $cache_data['expire']) {
+                    unlink($file);
+                }
+            }
+        }
+        
+        return true;
+    }
 
-        $results = array();
-        foreach ($users as $user) {
-            $results[] = array(
-                'id' => $user->ID,
-                'text' => $user->display_name,
-                'email' => $user->user_email
-            );
+    /**
+     * دریافت مسیر فایل کش
+     */
+    private function get_cache_file_path($key, $group) {
+        $key = preg_replace('/[^a-z0-9_-]/i', '', $key);
+        $group = preg_replace('/[^a-z0-9_-]/i', '', $group);
+        return $this->cache_dir . '/' . $group . '-' . $key . '.cache';
+    }
+
+    /**
+     * بررسی وجود داده در کش
+     */
+    public function has($key, $group = 'default') {
+        if (empty($this->settings['enable_cache'])) {
+            return false;
         }
 
-        return $results;
+        $cache_file = $this->get_cache_file_path($key, $group);
+
+        if (!file_exists($cache_file)) {
+            return false;
+        }
+
+        $cache_data = unserialize(file_get_contents($cache_file));
+
+        if (!is_array($cache_data) || !isset($cache_data['expire'])) {
+            return false;
+        }
+
+        return time() <= $cache_data['expire'];
+    }
+
+    /**
+     * دریافت آمار کش
+     */
+    public function get_stats() {
+        $files = glob($this->cache_dir . '/*');
+        $total_size = 0;
+        $file_count = 0;
+        $expired_count = 0;
+        $now = time();
+
+        foreach ($files as $file) {
+            if (is_file($file)) {
+                $file_count++;
+                $total_size += filesize($file);
+
+                $cache_data = unserialize(file_get_contents($file));
+                if (is_array($cache_data) && isset($cache_data['expire']) && $now > $cache_data['expire']) {
+                    $expired_count++;
+                }
+            }
+        }
+
+        return array(
+            'total_files' => $file_count,
+            'expired_files' => $expired_count,
+            'total_size' => size_format($total_size, 2),
+            'cache_dir' => $this->cache_dir,
+            'is_writable' => wp_is_writable($this->cache_dir)
+        );
     }
 }
