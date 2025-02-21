@@ -3,17 +3,11 @@ if (!defined('ABSPATH')) {
     exit('دسترسی مستقیم غیرمجاز است!');
 }
 
-/**
- * کلاس مدیریت دیتابیس افزونه
- */
 class ASG_DB {
     private static $instance = null;
-    private $db;
+    private $wpdb;
     private $tables;
 
-    /**
-     * دریافت نمونه کلاس (الگوی Singleton)
-     */
     public static function instance() {
         if (is_null(self::$instance)) {
             self::$instance = new self();
@@ -21,19 +15,14 @@ class ASG_DB {
         return self::$instance;
     }
 
-    /**
-     * سازنده کلاس
-     */
     public function __construct() {
         global $wpdb;
-        $this->db = $wpdb;
-
-        // تعریف نام جداول
-        $this->tables = array(
-            'guarantees' => $this->db->prefix . 'asg_guarantees',
-            'guarantee_meta' => $this->db->prefix . 'asg_guarantee_meta',
-            'logs' => $this->db->prefix . 'asg_logs'
-        );
+        $this->wpdb = $wpdb;
+        $this->tables = [
+            'guarantees' => $wpdb->prefix . 'asg_guarantees',
+            'meta' => $wpdb->prefix . 'asg_meta',
+            'logs' => $wpdb->prefix . 'asg_logs'
+        ];
     }
 
     /**
@@ -56,8 +45,8 @@ class ASG_DB {
                 expiry_date date NOT NULL,
                 status varchar(50) NOT NULL DEFAULT 'pending',
                 notes text,
-                created_at datetime NOT NULL,
-                updated_at datetime NOT NULL,
+                created_at datetime DEFAULT CURRENT_TIMESTAMP,
+                updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY  (id),
                 KEY product_id (product_id),
                 KEY user_id (user_id),
@@ -67,8 +56,8 @@ class ASG_DB {
             
             dbDelta($sql);
 
-            // جدول متای گارانتی
-            $sql = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}asg_guarantee_meta (
+            // جدول متا
+            $sql = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}asg_meta (
                 meta_id bigint(20) NOT NULL AUTO_INCREMENT,
                 guarantee_id bigint(20) NOT NULL,
                 meta_key varchar(255) NOT NULL,
@@ -87,7 +76,7 @@ class ASG_DB {
                 user_id bigint(20) DEFAULT NULL,
                 action varchar(100) NOT NULL,
                 details longtext,
-                created_at datetime NOT NULL,
+                created_at datetime DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY  (log_id),
                 KEY guarantee_id (guarantee_id),
                 KEY user_id (user_id),
@@ -95,14 +84,6 @@ class ASG_DB {
             ) $charset_collate;";
             
             dbDelta($sql);
-
-            // بررسی ایجاد موفق جداول
-            foreach (array('asg_guarantees', 'asg_guarantee_meta', 'asg_logs') as $table) {
-                $table_name = $wpdb->prefix . $table;
-                if ($wpdb->get_var("SHOW TABLES LIKE '$table_name'") != $table_name) {
-                    throw new Exception("خطا در ایجاد جدول $table_name");
-                }
-            }
 
             return true;
 
@@ -115,59 +96,37 @@ class ASG_DB {
     /**
      * افزودن گارانتی جدید
      */
-    public function insert_guarantee($data) {
+    public function add_guarantee($data) {
         try {
-            if (!isset($data['product_id'], $data['user_id'], $data['serial_number'], $data['purchase_date'])) {
-                throw new Exception('داده‌های ضروری وارد نشده‌اند');
-            }
-
-            $defaults = array(
+            $defaults = [
                 'status' => 'pending',
                 'created_at' => current_time('mysql'),
                 'updated_at' => current_time('mysql')
-            );
+            ];
 
             $data = wp_parse_args($data, $defaults);
 
-            // محاسبه تاریخ انقضا
-            if (!isset($data['expiry_date'])) {
-                $warranty_duration = get_post_meta($data['product_id'], '_warranty_duration', true);
-                if (!$warranty_duration) {
-                    $warranty_duration = get_option('asg_settings')['default_warranty_duration'];
-                }
-                $data['expiry_date'] = date('Y-m-d', strtotime($data['purchase_date'] . " +{$warranty_duration} months"));
-            }
-
-            $inserted = $this->db->insert(
+            $result = $this->wpdb->insert(
                 $this->tables['guarantees'],
-                array(
+                [
                     'product_id' => $data['product_id'],
                     'user_id' => $data['user_id'],
                     'serial_number' => $data['serial_number'],
                     'purchase_date' => $data['purchase_date'],
                     'expiry_date' => $data['expiry_date'],
                     'status' => $data['status'],
-                    'notes' => isset($data['notes']) ? $data['notes'] : '',
+                    'notes' => $data['notes'] ?? '',
                     'created_at' => $data['created_at'],
                     'updated_at' => $data['updated_at']
-                ),
-                array('%d', '%d', '%s', '%s', '%s', '%s', '%s', '%s', '%s')
+                ],
+                ['%d', '%d', '%s', '%s', '%s', '%s', '%s', '%s', '%s']
             );
 
-            if (!$inserted) {
-                throw new Exception($this->db->last_error);
+            if ($result === false) {
+                throw new Exception($this->wpdb->last_error);
             }
 
-            $guarantee_id = $this->db->insert_id;
-
-            // افزودن متا
-            if (!empty($data['meta'])) {
-                foreach ($data['meta'] as $key => $value) {
-                    $this->add_guarantee_meta($guarantee_id, $key, $value);
-                }
-            }
-
-            return $guarantee_id;
+            return $this->wpdb->insert_id;
 
         } catch (Exception $e) {
             error_log('ASG Insert Error: ' . $e->getMessage());
@@ -182,16 +141,16 @@ class ASG_DB {
         try {
             $data['updated_at'] = current_time('mysql');
 
-            $updated = $this->db->update(
+            $result = $this->wpdb->update(
                 $this->tables['guarantees'],
                 $data,
-                array('id' => $id),
+                ['id' => $id],
                 null,
-                array('%d')
+                ['%d']
             );
 
-            if ($updated === false) {
-                throw new Exception($this->db->last_error);
+            if ($result === false) {
+                throw new Exception($this->wpdb->last_error);
             }
 
             return true;
@@ -208,24 +167,20 @@ class ASG_DB {
     public function delete_guarantee($id) {
         try {
             // حذف متا
-            $this->db->delete($this->tables['guarantee_meta'], 
-                            array('guarantee_id' => $id), 
-                            array('%d'));
-
+            $this->wpdb->delete($this->tables['meta'], ['guarantee_id' => $id]);
+            
             // حذف لاگ‌ها
-            $this->db->delete($this->tables['logs'], 
-                            array('guarantee_id' => $id), 
-                            array('%d'));
-
+            $this->wpdb->delete($this->tables['logs'], ['guarantee_id' => $id]);
+            
             // حذف گارانتی
-            $deleted = $this->db->delete(
+            $result = $this->wpdb->delete(
                 $this->tables['guarantees'],
-                array('id' => $id),
-                array('%d')
+                ['id' => $id],
+                ['%d']
             );
 
-            if ($deleted === false) {
-                throw new Exception($this->db->last_error);
+            if ($result === false) {
+                throw new Exception($this->wpdb->last_error);
             }
 
             return true;
@@ -237,31 +192,25 @@ class ASG_DB {
     }
 
     /**
-     * افزودن متای گارانتی
+     * بررسی وجود جداول
      */
-    public function add_guarantee_meta($guarantee_id, $key, $value) {
-        return $this->db->insert(
-            $this->tables['guarantee_meta'],
-            array(
-                'guarantee_id' => $guarantee_id,
-                'meta_key' => $key,
-                'meta_value' => maybe_serialize($value)
-            ),
-            array('%d', '%s', '%s')
-        );
-    }
+    public function check_tables() {
+        $tables = [
+            $this->wpdb->prefix . 'asg_guarantees',
+            $this->wpdb->prefix . 'asg_meta',
+            $this->wpdb->prefix . 'asg_logs'
+        ];
 
-    /**
-     * دریافت متای گارانتی
-     */
-    public function get_guarantee_meta($guarantee_id, $key) {
-        $value = $this->db->get_var($this->db->prepare(
-            "SELECT meta_value FROM {$this->tables['guarantee_meta']} 
-             WHERE guarantee_id = %d AND meta_key = %s",
-            $guarantee_id,
-            $key
-        ));
-        
-        return $value ? maybe_unserialize($value) : null;
+        foreach ($tables as $table) {
+            $table_exists = $this->wpdb->get_var(
+                $this->wpdb->prepare("SHOW TABLES LIKE %s", $table)
+            );
+
+            if (!$table_exists) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }
