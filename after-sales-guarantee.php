@@ -1,133 +1,157 @@
 <?php
-/*
-Plugin Name: After Sales Guarantee
-Description: مدیریت گارانتی و خدمات پس از فروش برای ووکامرس
-Version: 1.8
-Author: Your Name
-*/
+/**
+ * Plugin Name: After Sales Guarantee
+ * Plugin URI: https://github.com/arman-ario/warranty
+ * Description: سیستم مدیریت گارانتی و خدمات پس از فروش
+ * Version: 1.0.0
+ * Author: Arman Ario
+ * Author URI: https://github.com/arman-ario
+ * Text Domain: after-sales-guarantee
+ * Domain Path: /languages
+ * Requires at least: 5.8
+ * Requires PHP: 7.4
+ */
 
+// جلوگیری از دسترسی مستقیم
 if (!defined('ABSPATH')) {
-    exit('دسترسی مستقیم غیرمجاز است!');
+    die('دسترسی مستقیم غیرمجاز است!');
 }
 
-// تعریف ثابت‌های افزونه
-define('ASG_VERSION', '1.8');
-define('ASG_PLUGIN_DIR', plugin_dir_path(__FILE__));
-define('ASG_PLUGIN_URL', plugin_dir_url(__FILE__));
-
-// لود کردن کلاس‌های اصلی
-require_once ASG_PLUGIN_DIR . 'includes/class-asg-loader.php';
-require_once ASG_PLUGIN_DIR . 'includes/class-asg-db.php';
-require_once ASG_PLUGIN_DIR . 'includes/class-asg-admin.php';
-require_once ASG_PLUGIN_DIR . 'includes/class-asg-public.php';
-require_once ASG_PLUGIN_DIR . 'includes/class-asg-api.php';
-require_once ASG_PLUGIN_DIR . 'includes/class-asg-security.php';
-require_once ASG_PLUGIN_DIR . 'includes/class-asg-notifications.php';
-require_once ASG_PLUGIN_DIR . 'includes/class-asg-performance.php';
-require_once ASG_PLUGIN_DIR . 'includes/class-asg-cache.php';
-require_once ASG_PLUGIN_DIR . 'includes/class-asg-assets-optimizer.php';
-require_once ASG_PLUGIN_DIR . 'includes/class-asg-reports.php';
-
-// لود کردن کلاس‌های ادمین
-require_once ASG_PLUGIN_DIR . 'includes/admin/class-asg-warranty-registration.php';
-require_once ASG_PLUGIN_DIR . 'includes/admin/class-asg-bulk-registration.php';
-require_once ASG_PLUGIN_DIR . 'includes/admin/class-asg-charts.php';
-require_once ASG_PLUGIN_DIR . 'includes/admin/class-asg-debug.php';
-require_once ASG_PLUGIN_DIR . 'includes/admin/class-asg-reports.php';
-require_once ASG_PLUGIN_DIR . 'includes/admin/class-asg-settings.php';
-
-/**
- * راه‌اندازی افزونه
- */
-function asg_init() {
-    // راه‌اندازی لودر اصلی
-    ASG_Loader::init();
-    
-    // راه‌اندازی کلاس‌های اصلی
-    ASG_Admin::instance();
-    ASG_Public::instance();
-    ASG_Security::instance();
-    ASG_API::instance();
-    ASG_Notifications::instance();
-    ASG_Performance::instance();
-    ASG_Cache::instance();
-    ASG_Assets_Optimizer::instance();
-    
-    // راه‌اندازی کلاس‌های ادمین در پنل مدیریت
-    if (is_admin()) {
-        ASG_Debug::instance();
-        ASG_Reports::instance();
-        ASG_Settings::instance();
-        ASG_Charts::instance();
-    }
+// تعریف ثابت‌ها
+if (!defined('ASG_VERSION')) {
+    define('ASG_VERSION', '1.0.0');
 }
-add_action('plugins_loaded', 'asg_init');
+if (!defined('ASG_PLUGIN_DIR')) {
+    define('ASG_PLUGIN_DIR', plugin_dir_path(__FILE__));
+}
+if (!defined('ASG_PLUGIN_URL')) {
+    define('ASG_PLUGIN_URL', plugin_dir_url(__FILE__));
+}
+if (!defined('ASG_PLUGIN_BASENAME')) {
+    define('ASG_PLUGIN_BASENAME', plugin_basename(__FILE__));
+}
 
-/**
- * فعال‌سازی افزونه
- */
-register_activation_hook(__FILE__, 'asg_activate');
-function asg_activate() {
-    // ایجاد جداول دیتابیس
-    ASG_DB::create_tables();
-    
-    // تنظیم مقادیر پیش‌فرض
-    if (!get_option('asg_statuses')) {
-        add_option('asg_statuses', array(
-            'در انتظار بررسی',
-            'آماده ارسال',
-            'ارسال شده',
-            'تعویض شده',
-            'خارج از گارانتی'
-        ));
+// بررسی وجود WooCommerce
+function asg_check_woocommerce() {
+    if (!class_exists('WooCommerce')) {
+        add_action('admin_notices', function() {
+            echo '<div class="notice notice-error is-dismissible"><p>';
+            echo 'افزونه گارانتی نیاز به نصب و فعال‌سازی WooCommerce دارد.';
+            echo '</p></div>';
+        });
+        return false;
     }
+    return true;
+}
 
-    // تنظیمات پیش‌فرض
-    $default_settings = array(
-        'default_warranty_duration' => 12,
-        'default_warranty_status' => 'در انتظار بررسی',
-        'enable_notifications' => 1,
-        'items_per_page' => 10,
-        'enable_logging' => 0,
-        'enable_cache' => 1,
-        'optimize_assets' => 1
+// فعال‌سازی خطاها در حالت دیباگ
+if (defined('WP_DEBUG') && WP_DEBUG === true) {
+    error_reporting(E_ALL);
+    ini_set('display_errors', 1);
+}
+
+// لود کردن فایل‌های اصلی
+function asg_load_files() {
+    $files = array(
+        'includes/class-asg-loader.php',
+        'includes/class-asg-db.php',
+        'includes/class-asg-public.php',
+        'includes/class-asg-admin.php',
+        'includes/class-asg-security.php',
     );
-    
-    if (!get_option('asg_settings')) {
-        add_option('asg_settings', $default_settings);
+
+    foreach ($files as $file) {
+        $path = ASG_PLUGIN_DIR . $file;
+        if (file_exists($path)) {
+            require_once $path;
+        } else {
+            error_log("ASG Error: File not found - $path");
+            return false;
+        }
+    }
+    return true;
+}
+
+// فعال‌سازی افزونه
+function asg_activate() {
+    if (!asg_check_woocommerce()) {
+        return;
     }
 
-    // پاکسازی ریرایت‌ها
-    flush_rewrite_rules();
+    if (!class_exists('ASG_DB')) {
+        require_once ASG_PLUGIN_DIR . 'includes/class-asg-db.php';
+    }
+
+    try {
+        // ایجاد جداول دیتابیس
+        ASG_DB::create_tables();
+        
+        // افزودن تنظیمات پیش‌فرض
+        if (!get_option('asg_settings')) {
+            update_option('asg_settings', array(
+                'enable_cache' => true,
+                'default_warranty_duration' => 12,
+                'enable_notifications' => true,
+                'items_per_page' => 20,
+                'log_retention_days' => 30
+            ));
+        }
+        
+        // ایجاد دایرکتوری‌های مورد نیاز
+        $upload_dir = wp_upload_dir();
+        $cache_dir = $upload_dir['basedir'] . '/asg-cache';
+        if (!file_exists($cache_dir)) {
+            wp_mkdir_p($cache_dir);
+        }
+
+        flush_rewrite_rules();
+        
+    } catch (Exception $e) {
+        error_log("ASG Activation Error: " . $e->getMessage());
+        wp_die('خطا در فعال‌سازی افزونه. لطفا لاگ را بررسی کنید.');
+    }
 }
 
-/**
- * غیرفعال‌سازی افزونه
- */
-register_deactivation_hook(__FILE__, 'asg_deactivate');
+// غیرفعال‌سازی افزونه
 function asg_deactivate() {
-    // پاکسازی کش
-    ASG_Cache::clear_all();
-    
-    // پاکسازی ریرایت‌ها
     flush_rewrite_rules();
 }
 
-/**
- * حذف افزونه
- */
-register_uninstall_hook(__FILE__, 'asg_uninstall');
+// حذف افزونه
 function asg_uninstall() {
-    // حذف جداول دیتابیس
-    ASG_DB::drop_tables();
-    
-    // حذف تنظیمات
-    delete_option('asg_statuses');
+    // پاک کردن تنظیمات و داده‌ها
     delete_option('asg_settings');
     
-    // حذف فایل‌های کش
-    ASG_Cache::delete_cache_directory();
-    
-    // پاکسازی ریرایت‌ها
-    flush_rewrite_rules();
+    // پاک کردن دایرکتوری کش
+    $upload_dir = wp_upload_dir();
+    $cache_dir = $upload_dir['basedir'] . '/asg-cache';
+    if (is_dir($cache_dir)) {
+        array_map('unlink', glob("$cache_dir/*.*"));
+        rmdir($cache_dir);
+    }
 }
+
+// راه‌اندازی افزونه
+function asg_init() {
+    if (!asg_check_woocommerce()) {
+        return;
+    }
+
+    if (!asg_load_files()) {
+        return;
+    }
+
+    try {
+        // راه‌اندازی کلاس‌های اصلی
+        ASG_Loader::instance();
+        
+    } catch (Exception $e) {
+        error_log("ASG Init Error: " . $e->getMessage());
+    }
+}
+
+// ثبت هوک‌ها
+register_activation_hook(__FILE__, 'asg_activate');
+register_deactivation_hook(__FILE__, 'asg_deactivate');
+register_uninstall_hook(__FILE__, 'asg_uninstall');
+add_action('plugins_loaded', 'asg_init');
